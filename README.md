@@ -10,6 +10,7 @@
 - `tool_call`（函数调用，严格/软支持）
 - `web_search`（是否支持搜索类工具参数）
 - `reasoning`（是否支持 reasoning 参数）
+- `structured_output`（是否支持 `json_schema` 结构化输出）
 
 ---
 
@@ -106,6 +107,7 @@ pwsh -File .\toolcall_probe_windows.ps1
 4. `tool_call`：在 chat-completions 中携带 function tool
 5. `web_search`：在 responses 中携带 `web_search_preview`
 6. `reasoning`：在 responses 中携带 `reasoning.effort`
+7. `structured_output`：在 chat-completions 中携带 `response_format=json_schema`
 
 状态说明：
 
@@ -130,14 +132,24 @@ Result 1 · 能力摘要
   web_search         1/3
   reasoning          2/3
 
-Result 2 · 模型能力矩阵
-MODEL                        | CHAT | STREAM | RESP | TOOL   | SEARCH | REASONING
------------------------------------------------------------------------------------------------
-gpt-4o-mini                  | Y    | Y      | Y    | Y      | Y      | Y
-gpt-4.1-mini                 | Y    | Y      | Y    | ~      | N      | Y
-legacy-model                 | Y    | N      | N    | N      | N      | N
+Result 2 · 接口支持分类
+- 同时支持 chat_completions + responses
+  ✓ gpt-4o-mini
+- 仅支持 chat_completions
+  ✓ gpt-4.1-mini
+- 仅支持 responses
+  - 无
+- 两者都不支持
+  ✓ legacy-model
 
-Result 3 · 按能力分类（支持）
+Result 3 · 模型能力矩阵
+MODEL                    | CHAT | STREAM | RESP | TOOL   | SEARCH | REASONING | STRUCTURED
+------------------------------------------------------------------------------------------------
+gpt-4o-mini              | Y    | Y      | Y    | Y      | Y      | Y         | Y
+gpt-4.1-mini             | Y    | Y      | Y    | ~      | N      | Y         | N
+legacy-model             | N    | N      | N    | N      | N      | N         | N
+
+Result 4 · 按能力分类（支持）
 - chat_completions
   ✓ gpt-4o-mini
   ✓ gpt-4.1-mini
@@ -145,6 +157,8 @@ Result 3 · 按能力分类（支持）
 - stream
   ✓ gpt-4o-mini
   ✓ gpt-4.1-mini
+- structured_output(json_schema)
+  ✓ gpt-4o-mini
 ...
 ```
 

@@ -500,6 +500,52 @@ JSON
   echo "Y|ok"
 }
 
+probe_structured_output_support() {
+  local base_url="$1"
+  local api_key="$2"
+  local model="$3"
+
+  local payload
+  payload=$(cat <<JSON
+{
+  "model": "$model",
+  "messages": [
+    {"role": "user", "content": "输出一个 JSON：字段 ok 为布尔值。"}
+  ],
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "simple_flag",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "ok": {"type": "boolean"}
+        },
+        "required": ["ok"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "temperature": 0
+}
+JSON
+)
+
+  request_json "${base_url}/v1/chat/completions" "$api_key" "$payload" 75
+  if ! is_http_2xx "$LAST_HTTP_CODE"; then
+    echo "N|http=${LAST_HTTP_CODE:-unknown}"
+    return
+  fi
+
+  local parsed
+  parsed="$(echo "$LAST_BODY" | parse_chat_basic_with_python)"
+  if [[ "$parsed" == "PASS" ]]; then
+    echo "Y|ok"
+  else
+    echo "N|invalid_response"
+  fi
+}
+
 save_result_line() {
   local model="$1"
   local chat="$2"
@@ -508,8 +554,9 @@ save_result_line() {
   local tool="$5"
   local search="$6"
   local reasoning="$7"
-  local notes="$8"
-  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$model" "$chat" "$stream" "$resp" "$tool" "$search" "$reasoning" "$notes" >> "$RESULTS_FILE"
+  local structured="$8"
+  local notes="$9"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$model" "$chat" "$stream" "$resp" "$tool" "$search" "$reasoning" "$structured" "$notes" >> "$RESULTS_FILE"
 }
 
 count_supported_by_column() {
@@ -523,7 +570,7 @@ print_models_by_col_value() {
   local icon="$3"
   local color="$4"
   local has_items=0
-  while IFS=$'\t' read -r model chat stream resp tool search reasoning notes; do
+  while IFS=$'\t' read -r model chat stream resp tool search reasoning structured notes; do
     local candidate=""
     case "$col" in
       2) candidate="$chat" ;;
@@ -532,6 +579,7 @@ print_models_by_col_value() {
       5) candidate="$tool" ;;
       6) candidate="$search" ;;
       7) candidate="$reasoning" ;;
+      8) candidate="$structured" ;;
       *) candidate="" ;;
     esac
 
@@ -547,13 +595,14 @@ print_models_by_col_value() {
 }
 
 render_summary() {
-  local chat_yes stream_yes resp_yes tool_yes search_yes reasoning_yes
+  local chat_yes stream_yes resp_yes tool_yes search_yes reasoning_yes structured_yes
   chat_yes="$(count_supported_by_column 2)"
   stream_yes="$(count_supported_by_column 3)"
   resp_yes="$(count_supported_by_column 4)"
   tool_yes="$(count_supported_by_column 5)"
   search_yes="$(count_supported_by_column 6)"
   reasoning_yes="$(count_supported_by_column 7)"
+  structured_yes="$(count_supported_by_column 8)"
 
   echo
   pretty_divider
@@ -567,18 +616,30 @@ render_summary() {
   printf "  %-18s %s/%s\n" "tool_call(strict)" "$tool_yes" "$TOTAL"
   printf "  %-18s %s/%s\n" "web_search" "$search_yes" "$TOTAL"
   printf "  %-18s %s/%s\n" "reasoning" "$reasoning_yes" "$TOTAL"
+  printf "  %-18s %s/%s\n" "structured_output" "$structured_yes" "$TOTAL"
   echo
 
-  printf "%b\n" "${BOLD}Result 2 · 模型能力矩阵${RESET}"
-  printf "%-28s | %-4s | %-6s | %-4s | %-6s | %-6s | %-9s\n" "MODEL" "CHAT" "STREAM" "RESP" "TOOL" "SEARCH" "REASONING"
-  printf "%.0s-" {1..95}
+  printf "%b\n" "${BOLD}Result 2 · 接口支持分类${RESET}"
+  printf "%b\n" "${CYAN}- 同时支持 chat_completions + responses${RESET}"
+  awk -F '\t' '$2=="Y" && $4=="Y" {printf "  ✓ %-34s %s\n", $1, $9; hit=1} END{if(!hit) print "  - 无"}' "$RESULTS_FILE"
+  printf "%b\n" "${CYAN}- 仅支持 chat_completions${RESET}"
+  awk -F '\t' '$2=="Y" && $4!="Y" {printf "  ✓ %-34s %s\n", $1, $9; hit=1} END{if(!hit) print "  - 无"}' "$RESULTS_FILE"
+  printf "%b\n" "${CYAN}- 仅支持 responses${RESET}"
+  awk -F '\t' '$2!="Y" && $4=="Y" {printf "  ✓ %-34s %s\n", $1, $9; hit=1} END{if(!hit) print "  - 无"}' "$RESULTS_FILE"
+  printf "%b\n" "${CYAN}- 两者都不支持${RESET}"
+  awk -F '\t' '$2!="Y" && $4!="Y" {printf "  ✗ %-34s %s\n", $1, $9; hit=1} END{if(!hit) print "  - 无"}' "$RESULTS_FILE"
   echo
-  while IFS=$'\t' read -r model chat stream resp tool search reasoning notes; do
-    printf "%-28s | %-4s | %-6s | %-4s | %-6s | %-6s | %-9s\n" "$model" "$chat" "$stream" "$resp" "$tool" "$search" "$reasoning"
+
+  printf "%b\n" "${BOLD}Result 3 · 模型能力矩阵${RESET}"
+  printf "%-24s | %-4s | %-6s | %-4s | %-6s | %-6s | %-9s | %-10s\n" "MODEL" "CHAT" "STREAM" "RESP" "TOOL" "SEARCH" "REASONING" "STRUCTURED"
+  printf "%.0s-" {1..112}
+  echo
+  while IFS=$'\t' read -r model chat stream resp tool search reasoning structured notes; do
+    printf "%-24s | %-4s | %-6s | %-4s | %-6s | %-6s | %-9s | %-10s\n" "$model" "$chat" "$stream" "$resp" "$tool" "$search" "$reasoning" "$structured"
   done < "$RESULTS_FILE"
   echo
 
-  printf "%b\n" "${BOLD}Result 3 · 按能力分类（支持）${RESET}"
+  printf "%b\n" "${BOLD}Result 4 · 按能力分类（支持）${RESET}"
   printf "%b\n" "${CYAN}- chat_completions${RESET}"
   print_models_by_col_value 2 "Y" "✓" "$GREEN"
   printf "%b\n" "${CYAN}- stream${RESET}"
@@ -593,6 +654,8 @@ render_summary() {
   print_models_by_col_value 6 "Y" "✓" "$GREEN"
   printf "%b\n" "${CYAN}- reasoning${RESET}"
   print_models_by_col_value 7 "Y" "✓" "$GREEN"
+  printf "%b\n" "${CYAN}- structured_output(json_schema)${RESET}"
+  print_models_by_col_value 8 "Y" "✓" "$GREEN"
 
   pretty_divider
   echo
@@ -654,9 +717,9 @@ main() {
     TOTAL=$((TOTAL+1))
     printf "%b\n" "${DIM}→ 测试模型:${RESET} $m"
 
-    local chat_raw stream_raw resp_raw tool_raw search_raw reasoning_raw
-    local chat_status stream_status resp_status tool_status search_status reasoning_status
-    local chat_detail stream_detail resp_detail tool_detail search_detail reasoning_detail
+    local chat_raw stream_raw resp_raw tool_raw search_raw reasoning_raw structured_raw
+    local chat_status stream_status resp_status tool_status search_status reasoning_status structured_status
+    local chat_detail stream_detail resp_detail tool_detail search_detail reasoning_detail structured_detail
 
     chat_raw="$(probe_chat_completion "$base_url" "$api_key" "$m")"
     stream_raw="$(probe_stream_support "$base_url" "$api_key" "$m")"
@@ -664,6 +727,7 @@ main() {
     tool_raw="$(probe_tool_call "$base_url" "$api_key" "$m")"
     search_raw="$(probe_search_support "$base_url" "$api_key" "$m")"
     reasoning_raw="$(probe_reasoning_support "$base_url" "$api_key" "$m")"
+    structured_raw="$(probe_structured_output_support "$base_url" "$api_key" "$m")"
 
     chat_status="${chat_raw%%|*}"; chat_detail="${chat_raw#*|}"
     stream_status="${stream_raw%%|*}"; stream_detail="${stream_raw#*|}"
@@ -671,11 +735,12 @@ main() {
     tool_status="${tool_raw%%|*}"; tool_detail="${tool_raw#*|}"
     search_status="${search_raw%%|*}"; search_detail="${search_raw#*|}"
     reasoning_status="${reasoning_raw%%|*}"; reasoning_detail="${reasoning_raw#*|}"
+    structured_status="${structured_raw%%|*}"; structured_detail="${structured_raw#*|}"
 
-    local notes="chat=${chat_detail};stream=${stream_detail};resp=${resp_detail};tool=${tool_detail};search=${search_detail};reasoning=${reasoning_detail}"
-    save_result_line "$m" "$chat_status" "$stream_status" "$resp_status" "$tool_status" "$search_status" "$reasoning_status" "$notes"
+    local notes="chat=${chat_detail};stream=${stream_detail};resp=${resp_detail};tool=${tool_detail};search=${search_detail};reasoning=${reasoning_detail};structured=${structured_detail}"
+    save_result_line "$m" "$chat_status" "$stream_status" "$resp_status" "$tool_status" "$search_status" "$reasoning_status" "$structured_status" "$notes"
 
-    print_ok "$m => chat:${chat_status} stream:${stream_status} responses:${resp_status} tool:${tool_status} search:${search_status} reasoning:${reasoning_status}"
+    print_ok "$m => chat:${chat_status} stream:${stream_status} responses:${resp_status} tool:${tool_status} search:${search_status} reasoning:${reasoning_status} structured:${structured_status}"
   done
 
   render_summary
