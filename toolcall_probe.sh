@@ -86,7 +86,7 @@ prompt_with_default() {
 }
 
 extract_models_with_python() {
-  python3 - <<'PY'
+  python3 -c '
 import json,sys
 raw=sys.stdin.read().strip()
 if not raw:
@@ -100,11 +100,11 @@ for it in items:
     mid=it.get("id")
     if isinstance(mid,str) and mid.strip():
         print(mid.strip())
-PY
+'
 }
 
 parse_tool_call_result_with_python() {
-  python3 - <<'PY'
+  python3 -c '
 import json,sys
 raw=sys.stdin.read().strip()
 if not raw:
@@ -135,7 +135,17 @@ if isinstance(content,str) and "tool" in content.lower():
     print("SOFT_PASS")
     sys.exit(0)
 print("FAIL")
-PY
+'
+}
+
+normalize_base_url() {
+  local url="$1"
+  url="$(trim_trailing_slash "$url")"
+  if [[ "$url" =~ /v1$ ]]; then
+    echo "${url%/v1}"
+  else
+    echo "$url"
+  fi
 }
 
 join_by_comma() {
@@ -148,13 +158,12 @@ pretty_divider() {
 }
 
 choose_models() {
-  local -n all_models_ref=$1
-  local -n selected_models_ref=$2
+  CHOSEN_MODELS=()
 
   echo
   print_section "可用模型列表"
   local i=1
-  for m in "${all_models_ref[@]}"; do
+  for m in "${MODELS[@]}"; do
     printf "%b\n" "  ${DIM}[$i]${RESET} $m"
     i=$((i+1))
   done
@@ -169,13 +178,13 @@ choose_models() {
   pick="$(echo "$pick" | tr '[:upper:]' '[:lower:]' | xargs)"
 
   if [[ "$pick" == "all" || "$pick" == "1" ]]; then
-    selected_models_ref=("${all_models_ref[@]}")
+    CHOSEN_MODELS=("${MODELS[@]}")
     return
   fi
 
   if [[ -z "$pick" ]]; then
     print_warn "未输入选择，默认全选。"
-    selected_models_ref=("${all_models_ref[@]}")
+    CHOSEN_MODELS=("${MODELS[@]}")
     return
   fi
 
@@ -185,8 +194,8 @@ choose_models() {
     local idx
     idx="$(echo "$raw_idx" | xargs)"
     if [[ "$idx" =~ ^[0-9]+$ ]]; then
-      if (( idx >= 1 && idx <= ${#all_models_ref[@]} )); then
-        tmp_selected+=("${all_models_ref[$((idx-1))]}")
+      if (( idx >= 1 && idx <= ${#MODELS[@]} )); then
+        tmp_selected+=("${MODELS[$((idx-1))]}")
       else
         print_warn "编号超出范围: $idx（已忽略）"
       fi
@@ -197,9 +206,9 @@ choose_models() {
 
   if (( ${#tmp_selected[@]} == 0 )); then
     print_warn "未选中有效模型，默认全选。"
-    selected_models_ref=("${all_models_ref[@]}")
+    CHOSEN_MODELS=("${MODELS[@]}")
   else
-    selected_models_ref=("${tmp_selected[@]}")
+    CHOSEN_MODELS=("${tmp_selected[@]}")
   fi
 }
 
@@ -343,7 +352,7 @@ main() {
   base_url="$(prompt_with_default "请输入 API Base URL（例如 https://api.openai.com）" "$default_url")"
   api_key="$(prompt_with_default "请输入 API Key" "$default_key")"
 
-  base_url="$(trim_trailing_slash "$base_url")"
+  base_url="$(normalize_base_url "$base_url")"
 
   if [[ -z "$base_url" || -z "$api_key" ]]; then
     print_err "URL 或 Key 不能为空。"
@@ -359,19 +368,21 @@ main() {
     exit 1
   fi
 
-  mapfile -t models < <(echo "$model_json" | extract_models_with_python)
+  MODELS=()
+  while IFS= read -r model_line; do
+    [[ -n "$model_line" ]] && MODELS+=("$model_line")
+  done < <(echo "$model_json" | extract_models_with_python)
 
-  if (( ${#models[@]} == 0 )); then
+  if (( ${#MODELS[@]} == 0 )); then
     print_err "模型清单为空或返回格式不兼容。"
     exit 1
   fi
 
-  print_ok "成功获取 ${#models[@]} 个模型。"
+  print_ok "成功获取 ${#MODELS[@]} 个模型。"
 
-  local -a selected=()
-  choose_models models selected
+  choose_models
 
-  if (( ${#selected[@]} == 0 )); then
+  if (( ${#CHOSEN_MODELS[@]} == 0 )); then
     print_err "未选择任何模型。"
     exit 1
   fi
@@ -379,7 +390,7 @@ main() {
   print_section "开始探测 Tool Call"
   RESULTS_FILE="$(mktemp)"
 
-  for m in "${selected[@]}"; do
+  for m in "${CHOSEN_MODELS[@]}"; do
     TOTAL=$((TOTAL+1))
     printf "%b\n" "${DIM}→ 测试模型:${RESET} $m"
 
