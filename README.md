@@ -4,22 +4,25 @@
 
 脚本特点：
 
-- 兼容 **macOS / Linux**（Bash）
+- 兼容 **macOS / Linux**（Bash）与 **Windows**（PowerShell）
 - 交互式输入 `Base URL` 与 `API Key`
 - 自动拉取模型清单（`/v1/models`）
 - 支持全选或按编号选择模型
 - 逐个模型探测 `tool call` 能力
-- 以友好的终端表格汇总结果（偏 mac 风格输出）
+- 以“按最终 Result 分类”的方式汇总结果，方便整理与阅读
 
 ---
 
 ## 文件说明
 
-- `toolcall_probe.sh`：主检测脚本
+- `toolcall_probe.sh`：macOS / Linux 版 Bash 检测脚本
+- `toolcall_probe_windows.ps1`：Windows 版 PowerShell 检测脚本
 
 ---
 
 ## 依赖要求
+
+### macOS / Linux（Bash）
 
 请确保系统已安装：
 
@@ -35,20 +38,54 @@ curl --version
 python3 --version
 ```
 
+### Windows（PowerShell）
+
+请确保系统已安装：
+
+- `PowerShell`（Windows 默认具备 `powershell`，推荐 `pwsh` 7+）
+
+可用以下命令检查：
+
+```powershell
+$PSVersionTable.PSVersion
+```
+
 ---
 
 ## 快速开始
 
-### 1) 赋予执行权限
+### macOS / Linux（Bash）
+
+1) 赋予执行权限
 
 ```bash
 chmod +x ./toolcall_probe.sh
 ```
 
-### 2) 运行脚本
+2) 运行脚本
 
 ```bash
 ./toolcall_probe.sh
+```
+
+### Windows（PowerShell）
+
+1) 如需临时放开当前会话脚本执行策略，可执行：
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+```
+
+2) 运行脚本（PowerShell 7+ 推荐）：
+
+```powershell
+pwsh -File .\toolcall_probe_windows.ps1
+```
+
+或使用 Windows PowerShell：
+
+```powershell
+powershell -File .\toolcall_probe_windows.ps1
 ```
 
 随后按提示输入：
@@ -67,10 +104,20 @@ chmod +x ./toolcall_probe.sh
 
 你也可以先设置环境变量，脚本会把它们作为默认值：
 
+### macOS / Linux
+
 ```bash
 export API_BASE_URL="https://api.openai.com"
 export API_KEY="<YOUR_API_KEY>"
 ./toolcall_probe.sh
+```
+
+### Windows PowerShell
+
+```powershell
+$env:API_BASE_URL = "https://api.openai.com"
+$env:API_KEY = "<YOUR_API_KEY>"
+pwsh -File .\toolcall_probe_windows.ps1
 ```
 
 ---
