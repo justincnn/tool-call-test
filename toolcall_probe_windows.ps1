@@ -63,38 +63,68 @@ function Invoke-ApiJson([string]$Uri, [string]$ApiKey, [string]$Method, [string]
         'Content-Type' = 'application/json'
     }
 
-    try {
-        if ($Method -eq 'GET') {
-            $resp = Invoke-RestMethod -Method Get -Uri $Uri -Headers $headers -TimeoutSec $TimeoutSec
-        }
-        else {
-            $resp = Invoke-RestMethod -Method Post -Uri $Uri -Headers $headers -Body $JsonBody -TimeoutSec $TimeoutSec
-        }
-
-        return [PSCustomObject]@{
-            Ok = $true
-            StatusCode = 200
-            Data = $resp
-            Error = ''
-        }
-    }
-    catch {
-        $statusCode = -1
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
-            if ($null -ne $_.Exception.Response -and $null -ne $_.Exception.Response.StatusCode) {
-                $statusCode = [int]$_.Exception.Response.StatusCode
+            if ($Method -eq 'GET') {
+                $resp = Invoke-RestMethod -Method Get -Uri $Uri -Headers $headers -TimeoutSec $TimeoutSec
+            }
+            else {
+                $resp = Invoke-RestMethod -Method Post -Uri $Uri -Headers $headers -Body $JsonBody -TimeoutSec $TimeoutSec
+            }
+
+            if ($null -ne $resp) {
+                $raw = $resp | ConvertTo-Json -Depth 50 -Compress
+                if ($raw -match '^\s*"?error code:\s*50[234]"?\s*$') {
+                    if ($attempt -lt 3) {
+                        Start-Sleep -Seconds $attempt
+                        continue
+                    }
+                    return [PSCustomObject]@{
+                        Ok = $false
+                        StatusCode = 502
+                        Data = $null
+                        Error = ($raw -replace '"', '')
+                    }
+                }
+            }
+
+            return [PSCustomObject]@{
+                Ok = $true
+                StatusCode = 200
+                Data = $resp
+                Error = ''
             }
         }
         catch {
             $statusCode = -1
-        }
+            try {
+                if ($null -ne $_.Exception.Response -and $null -ne $_.Exception.Response.StatusCode) {
+                    $statusCode = [int]$_.Exception.Response.StatusCode
+                }
+            }
+            catch {
+                $statusCode = -1
+            }
 
-        return [PSCustomObject]@{
-            Ok = $false
-            StatusCode = $statusCode
-            Data = $null
-            Error = $_.Exception.Message
+            if ($statusCode -in @(502, 503, 504) -and $attempt -lt 3) {
+                Start-Sleep -Seconds $attempt
+                continue
+            }
+
+            return [PSCustomObject]@{
+                Ok = $false
+                StatusCode = $statusCode
+                Data = $null
+                Error = $_.Exception.Message
+            }
         }
+    }
+
+    return [PSCustomObject]@{
+        Ok = $false
+        StatusCode = 502
+        Data = $null
+        Error = 'retry_exhausted'
     }
 }
 

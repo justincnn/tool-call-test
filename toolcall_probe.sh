@@ -269,15 +269,33 @@ request_json() {
   local payload="$3"
   local max_time="$4"
 
-  local response
-  response="$(curl -sS --connect-timeout 20 --max-time "$max_time" -w "\n%{http_code}" \
-    -H "Authorization: Bearer ${api_key}" \
-    -H "Content-Type: application/json" \
-    -d "$payload" \
-    "$endpoint" || true)"
+  local attempt=1
+  local max_attempts=3
+  local response http_code body
 
-  LAST_HTTP_CODE="$(echo "$response" | tail -n1 | tr -d '\r')"
-  LAST_BODY="$(echo "$response" | sed '$d')"
+  while (( attempt <= max_attempts )); do
+    response="$(curl -sS --connect-timeout 20 --max-time "$max_time" -w "\n%{http_code}" \
+      -H "Authorization: Bearer ${api_key}" \
+      -H "Content-Type: application/json" \
+      -d "$payload" \
+      "$endpoint" || true)"
+
+    http_code="$(echo "$response" | tail -n1 | tr -d '\r')"
+    body="$(echo "$response" | sed '$d')"
+
+    LAST_HTTP_CODE="$http_code"
+    LAST_BODY="$body"
+
+    if [[ "$http_code" =~ ^(502|503|504)$ ]] || echo "$body" | grep -qiE '^[[:space:]]*error code:[[:space:]]*50[234][[:space:]]*$'; then
+      if (( attempt < max_attempts )); then
+        sleep "$attempt"
+        attempt=$((attempt+1))
+        continue
+      fi
+    fi
+
+    break
+  done
 }
 
 request_stream_raw() {
@@ -286,20 +304,49 @@ request_stream_raw() {
   local payload="$3"
   local max_time="$4"
 
-  local response
-  response="$(curl -sS --no-buffer --connect-timeout 20 --max-time "$max_time" -w "\n%{http_code}" \
-    -H "Authorization: Bearer ${api_key}" \
-    -H "Content-Type: application/json" \
-    -d "$payload" \
-    "$endpoint" || true)"
+  local attempt=1
+  local max_attempts=3
+  local response http_code body
 
-  LAST_HTTP_CODE="$(echo "$response" | tail -n1 | tr -d '\r')"
-  LAST_BODY="$(echo "$response" | sed '$d')"
+  while (( attempt <= max_attempts )); do
+    response="$(curl -sS --no-buffer --connect-timeout 20 --max-time "$max_time" -w "\n%{http_code}" \
+      -H "Authorization: Bearer ${api_key}" \
+      -H "Content-Type: application/json" \
+      -d "$payload" \
+      "$endpoint" || true)"
+
+    http_code="$(echo "$response" | tail -n1 | tr -d '\r')"
+    body="$(echo "$response" | sed '$d')"
+
+    LAST_HTTP_CODE="$http_code"
+    LAST_BODY="$body"
+
+    if [[ "$http_code" =~ ^(502|503|504)$ ]] || echo "$body" | grep -qiE '^[[:space:]]*error code:[[:space:]]*50[234][[:space:]]*$'; then
+      if (( attempt < max_attempts )); then
+        sleep "$attempt"
+        attempt=$((attempt+1))
+        continue
+      fi
+    fi
+
+    break
+  done
 }
 
 is_http_2xx() {
   local code="$1"
   [[ "$code" =~ ^2 ]]
+}
+
+extract_upstream_error_code_from_body() {
+  local body="$1"
+  local code
+  code="$(echo "$body" | sed -nE 's/^[[:space:]]*error code:[[:space:]]*([0-9]{3})[[:space:]]*$/\1/ip' | head -n1)"
+  if [[ -n "$code" ]]; then
+    echo "$code"
+  else
+    echo ""
+  fi
 }
 
 probe_chat_completion() {
@@ -322,6 +369,13 @@ JSON
   request_json "${base_url}/v1/chat/completions" "$api_key" "$payload" 60
   if ! is_http_2xx "$LAST_HTTP_CODE"; then
     echo "N|http=${LAST_HTTP_CODE:-unknown}"
+    return
+  fi
+
+  local upstream_code
+  upstream_code="$(extract_upstream_error_code_from_body "$LAST_BODY")"
+  if [[ -n "$upstream_code" ]]; then
+    echo "N|upstream_error_code=${upstream_code}"
     return
   fi
 
@@ -358,10 +412,21 @@ JSON
     return
   fi
 
+  local upstream_code
+  upstream_code="$(extract_upstream_error_code_from_body "$LAST_BODY")"
+  if [[ -n "$upstream_code" ]]; then
+    echo "N|upstream_error_code=${upstream_code}"
+    return
+  fi
+
   if echo "$LAST_BODY" | grep -q "data:"; then
     echo "Y|sse_data_found"
   else
-    echo "N|no_sse_marker"
+    if echo "$LAST_BODY" | grep -qi '"choices"'; then
+      echo "Y|accepted_without_sse"
+    else
+      echo "N|no_sse_marker"
+    fi
   fi
 }
 
@@ -406,6 +471,13 @@ JSON
     return
   fi
 
+  local upstream_code
+  upstream_code="$(extract_upstream_error_code_from_body "$LAST_BODY")"
+  if [[ -n "$upstream_code" ]]; then
+    echo "N|upstream_error_code=${upstream_code}"
+    return
+  fi
+
   local parsed
   parsed="$(echo "$LAST_BODY" | parse_chat_tool_result_with_python)"
   case "$parsed" in
@@ -441,6 +513,13 @@ JSON
     return
   fi
 
+  local upstream_code
+  upstream_code="$(extract_upstream_error_code_from_body "$LAST_BODY")"
+  if [[ -n "$upstream_code" ]]; then
+    echo "N|upstream_error_code=${upstream_code}"
+    return
+  fi
+
   local parsed
   parsed="$(echo "$LAST_BODY" | parse_responses_basic_with_python)"
   if [[ "$parsed" == "PASS" ]]; then
@@ -473,6 +552,13 @@ JSON
     return
   fi
 
+  local upstream_code
+  upstream_code="$(extract_upstream_error_code_from_body "$LAST_BODY")"
+  if [[ -n "$upstream_code" ]]; then
+    echo "N|upstream_error_code=${upstream_code}"
+    return
+  fi
+
   echo "Y|ok"
 }
 
@@ -494,6 +580,13 @@ JSON
   request_json "${base_url}/v1/responses" "$api_key" "$payload" 75
   if ! is_http_2xx "$LAST_HTTP_CODE"; then
     echo "N|http=${LAST_HTTP_CODE:-unknown}"
+    return
+  fi
+
+  local upstream_code
+  upstream_code="$(extract_upstream_error_code_from_body "$LAST_BODY")"
+  if [[ -n "$upstream_code" ]]; then
+    echo "N|upstream_error_code=${upstream_code}"
     return
   fi
 
@@ -534,6 +627,13 @@ JSON
   request_json "${base_url}/v1/chat/completions" "$api_key" "$payload" 75
   if ! is_http_2xx "$LAST_HTTP_CODE"; then
     echo "N|http=${LAST_HTTP_CODE:-unknown}"
+    return
+  fi
+
+  local upstream_code
+  upstream_code="$(extract_upstream_error_code_from_body "$LAST_BODY")"
+  if [[ -n "$upstream_code" ]]; then
+    echo "N|upstream_error_code=${upstream_code}"
     return
   fi
 
@@ -711,7 +811,7 @@ main() {
 
   RESULTS_FILE="$(mktemp)"
 
-  print_section "开始探测模型能力（chat / stream / responses / tool / search / reasoning）"
+  print_section "开始探测模型能力（chat / stream / responses / tool / search / reasoning / structured）"
 
   for m in "${CHOSEN_MODELS[@]}"; do
     TOTAL=$((TOTAL+1))

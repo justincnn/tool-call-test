@@ -116,6 +116,7 @@ pwsh -File .\toolcall_probe_windows.ps1
 - `~`：软支持（目前用于 tool_call，文本疑似提及工具但非标准 `tool_calls`）
 
 > 注意：不同服务商对 OpenAI 兼容接口实现存在差异；同一能力在不同模型上可能表现不一致。
+> 脚本已增加网关错误兼容（`502/503/504` 自动重试 3 次），并识别部分代理返回的文本错误（如 `error code: 502`），结果会在明细中标注为 `upstream_error_code=xxx`，避免误判为“模型不支持”。
 
 ---
 
