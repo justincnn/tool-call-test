@@ -1,22 +1,22 @@
-# API Tool Call Probe
+# API Capability Probe
 
-一个用于快速检测 **OpenAI 兼容 API** 下不同模型是否支持 `tool call`（函数调用）的命令行工具。
+一个用于快速检测 **OpenAI 兼容 API** 下不同模型能力支持情况的命令行工具。
 
-脚本特点：
+支持探测能力：
 
-- 兼容 **macOS / Linux**（Bash）与 **Windows**（PowerShell）
-- 交互式输入 `Base URL` 与 `API Key`
-- 自动拉取模型清单（`/v1/models`）
-- 支持全选或按编号选择模型
-- 逐个模型探测 `tool call` 能力
-- 以“按最终 Result 分类”的方式汇总结果，方便整理与阅读
+- `chat_completions`（是否支持 `/v1/chat/completions`）
+- `stream`（是否接受流式请求）
+- `responses`（是否支持 `/v1/responses`）
+- `tool_call`（函数调用，严格/软支持）
+- `web_search`（是否支持搜索类工具参数）
+- `reasoning`（是否支持 reasoning 参数）
 
 ---
 
 ## 文件说明
 
-- `toolcall_probe.sh`：macOS / Linux 版 Bash 检测脚本
-- `toolcall_probe_windows.ps1`：Windows 版 PowerShell 检测脚本
+- `toolcall_probe.sh`：macOS / Linux 版 Bash 脚本
+- `toolcall_probe_windows.ps1`：Windows 版 PowerShell 脚本
 
 ---
 
@@ -26,11 +26,11 @@
 
 请确保系统已安装：
 
-- `bash`（macOS / Linux 默认通常具备）
+- `bash`
 - `curl`
 - `python3`
 
-可用以下命令检查：
+检查命令：
 
 ```bash
 bash --version
@@ -42,9 +42,9 @@ python3 --version
 
 请确保系统已安装：
 
-- `PowerShell`（Windows 默认具备 `powershell`，推荐 `pwsh` 7+）
+- `PowerShell`（Windows 自带 `powershell`，推荐 `pwsh` 7+）
 
-可用以下命令检查：
+检查命令：
 
 ```powershell
 $PSVersionTable.PSVersion
@@ -56,53 +56,27 @@ $PSVersionTable.PSVersion
 
 ### macOS / Linux（Bash）
 
-1) 赋予执行权限
-
 ```bash
 chmod +x ./toolcall_probe.sh
-```
-
-2) 运行脚本
-
-```bash
 ./toolcall_probe.sh
 ```
 
 ### Windows（PowerShell）
 
-1) 如需临时放开当前会话脚本执行策略，可执行：
-
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-```
-
-2) 运行脚本（PowerShell 7+ 推荐）：
-
-```powershell
 pwsh -File .\toolcall_probe_windows.ps1
 ```
 
-或使用 Windows PowerShell：
+或：
 
 ```powershell
 powershell -File .\toolcall_probe_windows.ps1
 ```
 
-随后按提示输入：
-
-- API Base URL（例如 `https://api.openai.com`）
-- API Key
-
-脚本会拉取模型列表并让你选择：
-
-- 输入 `all`（或 `1`）全选
-- 输入编号（逗号分隔）按需选择，例如：`1,3,5`
-
 ---
 
 ## 环境变量方式（可选）
-
-你也可以先设置环境变量，脚本会把它们作为默认值：
 
 ### macOS / Linux
 
@@ -124,17 +98,22 @@ pwsh -File .\toolcall_probe_windows.ps1
 
 ## 检测逻辑说明
 
-脚本会对每个选中模型调用：
+每个模型会执行以下探测：
 
-- `POST /v1/chat/completions`
-- 携带 `tools`（包含一个 `get_time` 函数定义）
-- 提示模型调用该工具
+1. `chat_completions`：发送最小消息到 `/v1/chat/completions`
+2. `stream`：在 `/v1/chat/completions` 携带 `stream=true`
+3. `responses`：发送最小输入到 `/v1/responses`
+4. `tool_call`：在 chat-completions 中携带 function tool
+5. `web_search`：在 responses 中携带 `web_search_preview`
+6. `reasoning`：在 responses 中携带 `reasoning.effort`
 
-结果判定：
+状态说明：
 
-- `PASS`：响应中出现标准 `message.tool_calls`
-- `SOFT_PASS`：未出现标准字段，但文本疑似提及工具调用
-- `FAIL`：未检测到有效工具调用，或请求失败
+- `Y`：支持
+- `N`：不支持/请求失败
+- `~`：软支持（目前用于 tool_call，文本疑似提及工具但非标准 `tool_calls`）
+
+> 注意：不同服务商对 OpenAI 兼容接口实现存在差异；同一能力在不同模型上可能表现不一致。
 
 ---
 
@@ -143,41 +122,41 @@ pwsh -File .\toolcall_probe_windows.ps1
 ```text
 最终 Result 分类
 
-Result 1 · 摘要
-  TOTAL        3
-  PASS         1
-  SOFT_PASS    1
-  FAIL         1
+Result 1 · 能力摘要
+  chat_completions   3/3
+  stream             2/3
+  responses          2/3
+  tool_call(strict)  1/3
+  web_search         1/3
+  reasoning          2/3
 
-Result 2 · PASS（严格命中 tool_calls）
-  ✓ gpt-4o-mini                            function=get_time
+Result 2 · 模型能力矩阵
+MODEL                        | CHAT | STREAM | RESP | TOOL   | SEARCH | REASONING
+-----------------------------------------------------------------------------------------------
+gpt-4o-mini                  | Y    | Y      | Y    | Y      | Y      | Y
+gpt-4.1-mini                 | Y    | Y      | Y    | ~      | N      | Y
+legacy-model                 | Y    | N      | N    | N      | N      | N
 
-Result 3 · SOFT_PASS（疑似支持）
-  ⚠ some-model                             content hints tool usage
-
-Result 4 · FAIL（未通过）
-  ✗ legacy-model                           no tool_calls
+Result 3 · 按能力分类（支持）
+- chat_completions
+  ✓ gpt-4o-mini
+  ✓ gpt-4.1-mini
+  ✓ legacy-model
+- stream
+  ✓ gpt-4o-mini
+  ✓ gpt-4.1-mini
+...
 ```
 
 ---
 
 ## 上传到 GitHub
 
-> 先在 GitHub 网页创建一个空仓库（例如：`api-toolcall-probe`），再在本地执行：
-
 ```bash
-git init
 git add .
-git commit -m "feat: add api tool call probe script"
-git branch -M main
-git remote add origin <YOUR_GITHUB_REPO_URL>
-git push -u origin main
+git commit -m "feat: extend capability probes for stream/responses/search/reasoning"
+git push origin HEAD
 ```
-
-例如：
-
-- HTTPS: `https://github.com/<your_name>/api-toolcall-probe.git`
-- SSH: `git@github.com:<your_name>/api-toolcall-probe.git`
 
 ---
 
@@ -190,4 +169,4 @@ git push -u origin main
 
 ## 免责声明
 
-不同服务商对 OpenAI 兼容程度不一。即便接口路径一致，`tool call` 字段格式也可能存在差异。该工具用于快速探测与对比，不保证覆盖所有私有扩展行为。
+该工具用于“快速探测与对比”，不是协议一致性认证工具。实际可用性以你的服务商文档与线上行为为准。

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # =========================================================
-# API Tool Call Probe
+# API Capability Probe
 # Supports: macOS / Linux (bash)
 # =========================================================
 
@@ -32,14 +32,14 @@ fi
 
 RESULTS_FILE=""
 TOTAL=0
-PASS=0
-FAIL=0
-SKIP=0
+
+LAST_HTTP_CODE=""
+LAST_BODY=""
 
 print_header() {
   echo
   printf "%b" "${GRAY_BG}                                                        ${RESET}\n"
-  printf "%b\n" "${GRAY_BG}   🔧  API Tool Call Probe (OpenAI-Compatible)            ${RESET}"
+  printf "%b\n" "${GRAY_BG}   🔧  API Capability Probe (OpenAI-Compatible)           ${RESET}"
   printf "%b" "${GRAY_BG}                                                        ${RESET}\n"
   echo
 }
@@ -72,6 +72,16 @@ trim_trailing_slash() {
   echo "${input%/}"
 }
 
+normalize_base_url() {
+  local url="$1"
+  url="$(trim_trailing_slash "$url")"
+  if [[ "$url" =~ /v1$ ]]; then
+    echo "${url%/v1}"
+  else
+    echo "$url"
+  fi
+}
+
 prompt_with_default() {
   local prompt="$1"
   local default_val="$2"
@@ -85,6 +95,10 @@ prompt_with_default() {
   fi
 }
 
+pretty_divider() {
+  printf "%b\n" "${BAR_BG}                                                        ${RESET}"
+}
+
 extract_models_with_python() {
   python3 -c '
 import json,sys
@@ -95,39 +109,38 @@ try:
     data=json.loads(raw)
 except Exception:
     sys.exit(0)
-items=data.get("data", [])
-for it in items:
+for it in data.get("data", []):
     mid=it.get("id")
     if isinstance(mid,str) and mid.strip():
         print(mid.strip())
 '
 }
 
-parse_tool_call_result_with_python() {
+parse_chat_tool_result_with_python() {
   python3 -c '
 import json,sys
 raw=sys.stdin.read().strip()
 if not raw:
-    print("INVALID_JSON")
+    print("FAIL")
     sys.exit(0)
 try:
     data=json.loads(raw)
 except Exception:
-    print("INVALID_JSON")
+    print("FAIL")
     sys.exit(0)
 choices=data.get("choices")
 if not isinstance(choices,list) or not choices:
-    print("NO_CHOICES")
+    print("FAIL")
     sys.exit(0)
 msg=(choices[0] or {}).get("message") or {}
 if not isinstance(msg,dict):
-    print("NO_MESSAGE")
+    print("FAIL")
     sys.exit(0)
 tc=msg.get("tool_calls")
 if isinstance(tc,list) and len(tc)>0:
     first=tc[0] if isinstance(tc[0],dict) else {}
     fn=(first.get("function") or {}) if isinstance(first,dict) else {}
-    name=fn.get("name","")
+    name=fn.get("name","unknown")
     print("PASS:"+str(name))
     sys.exit(0)
 content=msg.get("content")
@@ -138,23 +151,47 @@ print("FAIL")
 '
 }
 
-normalize_base_url() {
-  local url="$1"
-  url="$(trim_trailing_slash "$url")"
-  if [[ "$url" =~ /v1$ ]]; then
-    echo "${url%/v1}"
-  else
-    echo "$url"
-  fi
+parse_chat_basic_with_python() {
+  python3 -c '
+import json,sys
+raw=sys.stdin.read().strip()
+if not raw:
+    print("FAIL")
+    sys.exit(0)
+try:
+    data=json.loads(raw)
+except Exception:
+    print("FAIL")
+    sys.exit(0)
+choices=data.get("choices")
+if isinstance(choices,list) and len(choices)>0:
+    print("PASS")
+else:
+    print("FAIL")
+'
 }
 
-join_by_comma() {
-  local IFS=","
-  echo "$*"
-}
-
-pretty_divider() {
-  printf "%b\n" "${BAR_BG}                                                        ${RESET}"
+parse_responses_basic_with_python() {
+  python3 -c '
+import json,sys
+raw=sys.stdin.read().strip()
+if not raw:
+    print("FAIL")
+    sys.exit(0)
+try:
+    data=json.loads(raw)
+except Exception:
+    print("FAIL")
+    sys.exit(0)
+if isinstance(data.get("id"),str) and data.get("id"):
+    print("PASS")
+    sys.exit(0)
+out=data.get("output")
+if isinstance(out,list):
+    print("PASS")
+    sys.exit(0)
+print("FAIL")
+'
 }
 
 choose_models() {
@@ -223,20 +260,116 @@ fetch_models() {
     -H "Content-Type: application/json" \
     "$endpoint" || true)"
 
-  if [[ -z "$response" ]]; then
-    echo ""
-    return
-  fi
-
   echo "$response"
 }
 
-probe_model_tool_call() {
+request_json() {
+  local endpoint="$1"
+  local api_key="$2"
+  local payload="$3"
+  local max_time="$4"
+
+  local response
+  response="$(curl -sS --connect-timeout 20 --max-time "$max_time" -w "\n%{http_code}" \
+    -H "Authorization: Bearer ${api_key}" \
+    -H "Content-Type: application/json" \
+    -d "$payload" \
+    "$endpoint" || true)"
+
+  LAST_HTTP_CODE="$(echo "$response" | tail -n1 | tr -d '\r')"
+  LAST_BODY="$(echo "$response" | sed '$d')"
+}
+
+request_stream_raw() {
+  local endpoint="$1"
+  local api_key="$2"
+  local payload="$3"
+  local max_time="$4"
+
+  local response
+  response="$(curl -sS --no-buffer --connect-timeout 20 --max-time "$max_time" -w "\n%{http_code}" \
+    -H "Authorization: Bearer ${api_key}" \
+    -H "Content-Type: application/json" \
+    -d "$payload" \
+    "$endpoint" || true)"
+
+  LAST_HTTP_CODE="$(echo "$response" | tail -n1 | tr -d '\r')"
+  LAST_BODY="$(echo "$response" | sed '$d')"
+}
+
+is_http_2xx() {
+  local code="$1"
+  [[ "$code" =~ ^2 ]]
+}
+
+probe_chat_completion() {
   local base_url="$1"
   local api_key="$2"
   local model="$3"
 
-  local endpoint="${base_url}/v1/chat/completions"
+  local payload
+  payload=$(cat <<JSON
+{
+  "model": "$model",
+  "messages": [
+    {"role": "user", "content": "请回复 ok"}
+  ],
+  "temperature": 0
+}
+JSON
+)
+
+  request_json "${base_url}/v1/chat/completions" "$api_key" "$payload" 60
+  if ! is_http_2xx "$LAST_HTTP_CODE"; then
+    echo "N|http=${LAST_HTTP_CODE:-unknown}"
+    return
+  fi
+
+  local parsed
+  parsed="$(echo "$LAST_BODY" | parse_chat_basic_with_python)"
+  if [[ "$parsed" == "PASS" ]]; then
+    echo "Y|ok"
+  else
+    echo "N|invalid_response"
+  fi
+}
+
+probe_stream_support() {
+  local base_url="$1"
+  local api_key="$2"
+  local model="$3"
+
+  local payload
+  payload=$(cat <<JSON
+{
+  "model": "$model",
+  "messages": [
+    {"role": "user", "content": "请简单回复 hi"}
+  ],
+  "stream": true,
+  "temperature": 0
+}
+JSON
+)
+
+  request_stream_raw "${base_url}/v1/chat/completions" "$api_key" "$payload" 60
+  if ! is_http_2xx "$LAST_HTTP_CODE"; then
+    echo "N|http=${LAST_HTTP_CODE:-unknown}"
+    return
+  fi
+
+  if echo "$LAST_BODY" | grep -q "data:"; then
+    echo "Y|sse_data_found"
+  else
+    echo "N|no_sse_marker"
+  fi
+}
+
+probe_tool_call() {
+  local base_url="$1"
+  local api_key="$2"
+  local model="$3"
+
   local payload
   payload=$(cat <<JSON
 {
@@ -267,98 +400,199 @@ probe_model_tool_call() {
 JSON
 )
 
-  local response http_code
-  response="$(curl -sS --connect-timeout 20 --max-time 90 -w "\n%{http_code}" \
-    -H "Authorization: Bearer ${api_key}" \
-    -H "Content-Type: application/json" \
-    -d "$payload" \
-    "$endpoint" || true)"
-
-  http_code="$(echo "$response" | tail -n1 | tr -d '\r')"
-  local body
-  body="$(echo "$response" | sed '$d')"
-
-  if [[ ! "$http_code" =~ ^2 ]]; then
-    echo "HTTP_FAIL|$http_code|$body"
+  request_json "${base_url}/v1/chat/completions" "$api_key" "$payload" 90
+  if ! is_http_2xx "$LAST_HTTP_CODE"; then
+    echo "N|http=${LAST_HTTP_CODE:-unknown}"
     return
   fi
 
   local parsed
-  parsed="$(echo "$body" | parse_tool_call_result_with_python)"
-
+  parsed="$(echo "$LAST_BODY" | parse_chat_tool_result_with_python)"
   case "$parsed" in
     PASS:*)
-      local fn_name="${parsed#PASS:}"
-      echo "PASS|$fn_name|$body"
+      echo "Y|${parsed#PASS:}"
       ;;
     SOFT_PASS)
-      echo "SOFT_PASS||$body"
+      echo "~|content_hints_tool"
       ;;
     *)
-      echo "FAIL||$body"
+      echo "N|no_tool_calls"
       ;;
   esac
 }
 
-save_result_line() {
-  local model="$1"
-  local status="$2"
-  local detail="$3"
-  printf "%s\t%s\t%s\n" "$model" "$status" "$detail" >> "$RESULTS_FILE"
+probe_responses_support() {
+  local base_url="$1"
+  local api_key="$2"
+  local model="$3"
+
+  local payload
+  payload=$(cat <<JSON
+{
+  "model": "$model",
+  "input": "请回复 ok"
+}
+JSON
+)
+
+  request_json "${base_url}/v1/responses" "$api_key" "$payload" 60
+  if ! is_http_2xx "$LAST_HTTP_CODE"; then
+    echo "N|http=${LAST_HTTP_CODE:-unknown}"
+    return
+  fi
+
+  local parsed
+  parsed="$(echo "$LAST_BODY" | parse_responses_basic_with_python)"
+  if [[ "$parsed" == "PASS" ]]; then
+    echo "Y|ok"
+  else
+    echo "N|invalid_response"
+  fi
 }
 
-render_summary_table() {
-  local has_items
+probe_search_support() {
+  local base_url="$1"
+  local api_key="$2"
+  local model="$3"
+
+  local payload
+  payload=$(cat <<JSON
+{
+  "model": "$model",
+  "input": "请搜索今天的科技新闻并给一条标题。",
+  "tools": [
+    {"type": "web_search_preview"}
+  ]
+}
+JSON
+)
+
+  request_json "${base_url}/v1/responses" "$api_key" "$payload" 75
+  if ! is_http_2xx "$LAST_HTTP_CODE"; then
+    echo "N|http=${LAST_HTTP_CODE:-unknown}"
+    return
+  fi
+
+  echo "Y|ok"
+}
+
+probe_reasoning_support() {
+  local base_url="$1"
+  local api_key="$2"
+  local model="$3"
+
+  local payload
+  payload=$(cat <<JSON
+{
+  "model": "$model",
+  "input": "比较 17*19 与 18*18 的大小并说明理由。",
+  "reasoning": {"effort": "medium"}
+}
+JSON
+)
+
+  request_json "${base_url}/v1/responses" "$api_key" "$payload" 75
+  if ! is_http_2xx "$LAST_HTTP_CODE"; then
+    echo "N|http=${LAST_HTTP_CODE:-unknown}"
+    return
+  fi
+
+  echo "Y|ok"
+}
+
+save_result_line() {
+  local model="$1"
+  local chat="$2"
+  local stream="$3"
+  local resp="$4"
+  local tool="$5"
+  local search="$6"
+  local reasoning="$7"
+  local notes="$8"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$model" "$chat" "$stream" "$resp" "$tool" "$search" "$reasoning" "$notes" >> "$RESULTS_FILE"
+}
+
+count_supported_by_column() {
+  local col="$1"
+  awk -F '\t' -v c="$col" '$c=="Y"{n++} END{print n+0}' "$RESULTS_FILE"
+}
+
+print_models_by_col_value() {
+  local col="$1"
+  local val="$2"
+  local icon="$3"
+  local color="$4"
+  local has_items=0
+  while IFS=$'\t' read -r model chat stream resp tool search reasoning notes; do
+    local candidate=""
+    case "$col" in
+      2) candidate="$chat" ;;
+      3) candidate="$stream" ;;
+      4) candidate="$resp" ;;
+      5) candidate="$tool" ;;
+      6) candidate="$search" ;;
+      7) candidate="$reasoning" ;;
+      *) candidate="" ;;
+    esac
+
+    if [[ "$candidate" == "$val" ]]; then
+      has_items=1
+      printf "  %b%-1s%b %-34s %s\n" "$color" "$icon" "$RESET" "$model" "$notes"
+    fi
+  done < "$RESULTS_FILE"
+
+  if (( has_items == 0 )); then
+    printf "  ${DIM}- 无${RESET}\n"
+  fi
+}
+
+render_summary() {
+  local chat_yes stream_yes resp_yes tool_yes search_yes reasoning_yes
+  chat_yes="$(count_supported_by_column 2)"
+  stream_yes="$(count_supported_by_column 3)"
+  resp_yes="$(count_supported_by_column 4)"
+  tool_yes="$(count_supported_by_column 5)"
+  search_yes="$(count_supported_by_column 6)"
+  reasoning_yes="$(count_supported_by_column 7)"
 
   echo
   pretty_divider
   printf "%b\n" "${BOLD}${CYAN}最终 Result 分类${RESET}"
   pretty_divider
 
-  printf "%b\n" "${BOLD}Result 1 · 摘要${RESET}"
-  printf "  %-12s %s\n" "TOTAL" "$TOTAL"
-  printf "  %-12s %b\n" "PASS" "${GREEN}$PASS${RESET}"
-  printf "  %-12s %b\n" "SOFT_PASS" "${YELLOW}$SKIP${RESET}"
-  printf "  %-12s %b\n" "FAIL" "${RED}$FAIL${RESET}"
+  printf "%b\n" "${BOLD}Result 1 · 能力摘要${RESET}"
+  printf "  %-18s %s/%s\n" "chat_completions" "$chat_yes" "$TOTAL"
+  printf "  %-18s %s/%s\n" "stream" "$stream_yes" "$TOTAL"
+  printf "  %-18s %s/%s\n" "responses" "$resp_yes" "$TOTAL"
+  printf "  %-18s %s/%s\n" "tool_call(strict)" "$tool_yes" "$TOTAL"
+  printf "  %-18s %s/%s\n" "web_search" "$search_yes" "$TOTAL"
+  printf "  %-18s %s/%s\n" "reasoning" "$reasoning_yes" "$TOTAL"
   echo
 
-  printf "%b\n" "${BOLD}Result 2 · PASS（严格命中 tool_calls）${RESET}"
-  has_items=0
-  while IFS=$'\t' read -r model status detail; do
-    if [[ "$status" == "PASS" ]]; then
-      has_items=1
-      printf "  ${GREEN}✓${RESET} %-38s %s\n" "$model" "$detail"
-    fi
+  printf "%b\n" "${BOLD}Result 2 · 模型能力矩阵${RESET}"
+  printf "%-28s | %-4s | %-6s | %-4s | %-6s | %-6s | %-9s\n" "MODEL" "CHAT" "STREAM" "RESP" "TOOL" "SEARCH" "REASONING"
+  printf "%.0s-" {1..95}
+  echo
+  while IFS=$'\t' read -r model chat stream resp tool search reasoning notes; do
+    printf "%-28s | %-4s | %-6s | %-4s | %-6s | %-6s | %-9s\n" "$model" "$chat" "$stream" "$resp" "$tool" "$search" "$reasoning"
   done < "$RESULTS_FILE"
-  if (( has_items == 0 )); then
-    printf "  ${DIM}- 无${RESET}\n"
-  fi
   echo
 
-  printf "%b\n" "${BOLD}Result 3 · SOFT_PASS（疑似支持）${RESET}"
-  has_items=0
-  while IFS=$'\t' read -r model status detail; do
-    if [[ "$status" == "SOFT_PASS" ]]; then
-      has_items=1
-      printf "  ${YELLOW}⚠${RESET} %-38s %s\n" "$model" "$detail"
-    fi
-  done < "$RESULTS_FILE"
-  if (( has_items == 0 )); then
-    printf "  ${DIM}- 无${RESET}\n"
-  fi
-  echo
-
-  printf "%b\n" "${BOLD}Result 4 · FAIL（未通过）${RESET}"
-  has_items=0
-  while IFS=$'\t' read -r model status detail; do
-    if [[ "$status" == "FAIL" ]]; then
-      has_items=1
-      printf "  ${RED}✗${RESET} %-38s %s\n" "$model" "$detail"
-    fi
-  done < "$RESULTS_FILE"
-  if (( has_items == 0 )); then
-    printf "  ${DIM}- 无${RESET}\n"
-  fi
+  printf "%b\n" "${BOLD}Result 3 · 按能力分类（支持）${RESET}"
+  printf "%b\n" "${CYAN}- chat_completions${RESET}"
+  print_models_by_col_value 2 "Y" "✓" "$GREEN"
+  printf "%b\n" "${CYAN}- stream${RESET}"
+  print_models_by_col_value 3 "Y" "✓" "$GREEN"
+  printf "%b\n" "${CYAN}- responses${RESET}"
+  print_models_by_col_value 4 "Y" "✓" "$GREEN"
+  printf "%b\n" "${CYAN}- tool_call（严格）${RESET}"
+  print_models_by_col_value 5 "Y" "✓" "$GREEN"
+  printf "%b\n" "${CYAN}- tool_call（软支持）${RESET}"
+  print_models_by_col_value 5 "~" "⚠" "$YELLOW"
+  printf "%b\n" "${CYAN}- web_search${RESET}"
+  print_models_by_col_value 6 "Y" "✓" "$GREEN"
+  printf "%b\n" "${CYAN}- reasoning${RESET}"
+  print_models_by_col_value 7 "Y" "✓" "$GREEN"
 
   pretty_divider
   echo
@@ -371,10 +605,8 @@ main() {
   print_header
   print_section "输入连接信息"
 
-  local default_url
-  default_url="${API_BASE_URL:-}"
-  local default_key
-  default_key="${API_KEY:-}"
+  local default_url="${API_BASE_URL:-}"
+  local default_key="${API_KEY:-}"
 
   local base_url api_key
   base_url="$(prompt_with_default "请输入 API Base URL（例如 https://api.openai.com）" "$default_url")"
@@ -407,7 +639,6 @@ main() {
   fi
 
   print_ok "成功获取 ${#MODELS[@]} 个模型。"
-
   choose_models
 
   if (( ${#CHOSEN_MODELS[@]} == 0 )); then
@@ -415,44 +646,39 @@ main() {
     exit 1
   fi
 
-  print_section "开始探测 Tool Call"
   RESULTS_FILE="$(mktemp)"
+
+  print_section "开始探测模型能力（chat / stream / responses / tool / search / reasoning）"
 
   for m in "${CHOSEN_MODELS[@]}"; do
     TOTAL=$((TOTAL+1))
     printf "%b\n" "${DIM}→ 测试模型:${RESET} $m"
 
-    local result_line status detail raw
-    raw="$(probe_model_tool_call "$base_url" "$api_key" "$m")"
+    local chat_raw stream_raw resp_raw tool_raw search_raw reasoning_raw
+    local chat_status stream_status resp_status tool_status search_status reasoning_status
+    local chat_detail stream_detail resp_detail tool_detail search_detail reasoning_detail
 
-    status="$(echo "$raw" | cut -d'|' -f1)"
-    detail="$(echo "$raw" | cut -d'|' -f2)"
+    chat_raw="$(probe_chat_completion "$base_url" "$api_key" "$m")"
+    stream_raw="$(probe_stream_support "$base_url" "$api_key" "$m")"
+    resp_raw="$(probe_responses_support "$base_url" "$api_key" "$m")"
+    tool_raw="$(probe_tool_call "$base_url" "$api_key" "$m")"
+    search_raw="$(probe_search_support "$base_url" "$api_key" "$m")"
+    reasoning_raw="$(probe_reasoning_support "$base_url" "$api_key" "$m")"
 
-    case "$status" in
-      PASS)
-        PASS=$((PASS+1))
-        print_ok "$m 支持 tool call（function: ${detail:-unknown}）"
-        save_result_line "$m" "PASS" "function=${detail:-unknown}"
-        ;;
-      SOFT_PASS)
-        SKIP=$((SKIP+1))
-        print_warn "$m 返回内容疑似提及工具，但未严格返回 tool_calls"
-        save_result_line "$m" "SOFT_PASS" "content hints tool usage"
-        ;;
-      HTTP_FAIL)
-        FAIL=$((FAIL+1))
-        print_err "$m 请求失败（HTTP ${detail:-unknown}）"
-        save_result_line "$m" "FAIL" "http=${detail:-unknown}"
-        ;;
-      *)
-        FAIL=$((FAIL+1))
-        print_err "$m 未检测到有效 tool_calls"
-        save_result_line "$m" "FAIL" "no tool_calls"
-        ;;
-    esac
+    chat_status="${chat_raw%%|*}"; chat_detail="${chat_raw#*|}"
+    stream_status="${stream_raw%%|*}"; stream_detail="${stream_raw#*|}"
+    resp_status="${resp_raw%%|*}"; resp_detail="${resp_raw#*|}"
+    tool_status="${tool_raw%%|*}"; tool_detail="${tool_raw#*|}"
+    search_status="${search_raw%%|*}"; search_detail="${search_raw#*|}"
+    reasoning_status="${reasoning_raw%%|*}"; reasoning_detail="${reasoning_raw#*|}"
+
+    local notes="chat=${chat_detail};stream=${stream_detail};resp=${resp_detail};tool=${tool_detail};search=${search_detail};reasoning=${reasoning_detail}"
+    save_result_line "$m" "$chat_status" "$stream_status" "$resp_status" "$tool_status" "$search_status" "$reasoning_status" "$notes"
+
+    print_ok "$m => chat:${chat_status} stream:${stream_status} responses:${resp_status} tool:${tool_status} search:${search_status} reasoning:${reasoning_status}"
   done
 
-  render_summary_table
+  render_summary
   rm -f "$RESULTS_FILE"
 
   print_section "完成"
