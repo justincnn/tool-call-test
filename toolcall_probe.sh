@@ -308,30 +308,58 @@ save_result_line() {
 }
 
 render_summary_table() {
+  local has_items
+
   echo
   pretty_divider
-  printf "%b\n" "${BOLD}${CYAN}检测结果总览${RESET}"
+  printf "%b\n" "${BOLD}${CYAN}最终 Result 分类${RESET}"
   pretty_divider
 
-  printf "%-38s | %-10s | %s\n" "MODEL" "RESULT" "DETAIL"
-  printf "%.0s-" {1..90}
+  printf "%b\n" "${BOLD}Result 1 · 摘要${RESET}"
+  printf "  %-12s %s\n" "TOTAL" "$TOTAL"
+  printf "  %-12s %b\n" "PASS" "${GREEN}$PASS${RESET}"
+  printf "  %-12s %b\n" "SOFT_PASS" "${YELLOW}$SKIP${RESET}"
+  printf "  %-12s %b\n" "FAIL" "${RED}$FAIL${RESET}"
   echo
 
+  printf "%b\n" "${BOLD}Result 2 · PASS（严格命中 tool_calls）${RESET}"
+  has_items=0
   while IFS=$'\t' read -r model status detail; do
-    local status_colored="$status"
-    case "$status" in
-      PASS) status_colored="${GREEN}PASS${RESET}" ;;
-      SOFT_PASS) status_colored="${YELLOW}SOFT_PASS${RESET}" ;;
-      FAIL) status_colored="${RED}FAIL${RESET}" ;;
-      SKIP) status_colored="${DIM}SKIP${RESET}" ;;
-      *) status_colored="$status" ;;
-    esac
-
-    printf "%-38s | %-19b | %s\n" "$model" "$status_colored" "$detail"
+    if [[ "$status" == "PASS" ]]; then
+      has_items=1
+      printf "  ${GREEN}✓${RESET} %-38s %s\n" "$model" "$detail"
+    fi
   done < "$RESULTS_FILE"
+  if (( has_items == 0 )); then
+    printf "  ${DIM}- 无${RESET}\n"
+  fi
+  echo
 
-  pretty_divider
-  printf "%b\n" "${BOLD}总计:${RESET} $TOTAL    ${GREEN}PASS:${PASS}${RESET}    ${YELLOW}SOFT_PASS:${SKIP}${RESET}    ${RED}FAIL:${FAIL}${RESET}"
+  printf "%b\n" "${BOLD}Result 3 · SOFT_PASS（疑似支持）${RESET}"
+  has_items=0
+  while IFS=$'\t' read -r model status detail; do
+    if [[ "$status" == "SOFT_PASS" ]]; then
+      has_items=1
+      printf "  ${YELLOW}⚠${RESET} %-38s %s\n" "$model" "$detail"
+    fi
+  done < "$RESULTS_FILE"
+  if (( has_items == 0 )); then
+    printf "  ${DIM}- 无${RESET}\n"
+  fi
+  echo
+
+  printf "%b\n" "${BOLD}Result 4 · FAIL（未通过）${RESET}"
+  has_items=0
+  while IFS=$'\t' read -r model status detail; do
+    if [[ "$status" == "FAIL" ]]; then
+      has_items=1
+      printf "  ${RED}✗${RESET} %-38s %s\n" "$model" "$detail"
+    fi
+  done < "$RESULTS_FILE"
+  if (( has_items == 0 )); then
+    printf "  ${DIM}- 无${RESET}\n"
+  fi
+
   pretty_divider
   echo
 }

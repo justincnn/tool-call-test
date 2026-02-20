@@ -91,14 +91,25 @@ export API_KEY="<YOUR_API_KEY>"
 
 ---
 
-## 输出示例
+## 输出示例（按最终 Result 分类）
 
 ```text
-MODEL                                  | RESULT     | DETAIL
-------------------------------------------------------------------------------------------
-gpt-4o-mini                            | PASS       | function=get_time
-some-model                             | SOFT_PASS  | content hints tool usage
-legacy-model                           | FAIL       | no tool_calls
+最终 Result 分类
+
+Result 1 · 摘要
+  TOTAL        3
+  PASS         1
+  SOFT_PASS    1
+  FAIL         1
+
+Result 2 · PASS（严格命中 tool_calls）
+  ✓ gpt-4o-mini                            function=get_time
+
+Result 3 · SOFT_PASS（疑似支持）
+  ⚠ some-model                             content hints tool usage
+
+Result 4 · FAIL（未通过）
+  ✗ legacy-model                           no tool_calls
 ```
 
 ---
